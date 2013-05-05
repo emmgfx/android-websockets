@@ -30,6 +30,7 @@
 
 package com.codebutler.android_websockets;
 
+import android.os.PowerManager.WakeLock;
 import android.util.Log;
 
 import java.io.*;
@@ -40,6 +41,8 @@ public class HybiParser {
     private static final String TAG = "HybiParser";
 
     private WebSocketClient mClient;
+    
+    private WakeLock mWakeLock;
 
     private boolean mMasking = true;
 
@@ -95,7 +98,12 @@ public class HybiParser {
         mClient = client;
     }
 
-    private static byte[] mask(byte[] payload, byte[] mask, int offset) {
+    public HybiParser(WebSocketClient webSocketClient, WakeLock wakelock) {
+    	mWakeLock = wakelock;
+    	mClient = webSocketClient;
+    }
+
+	private static byte[] mask(byte[] payload, byte[] mask, int offset) {
         if (mask.length == 0) return payload;
 
         for (int i = 0; i < payload.length - offset; i++) {
@@ -127,11 +135,19 @@ public class HybiParser {
                     mStage = 0;
                     break;
             }
+            if(mWakeLock != null && mFinal) synchronized (mWakeLock) {
+            	if(mWakeLock.isHeld())mWakeLock.release();
+			}
         }
         mClient.getListener().onDisconnect(0, "EOF");
     }
 
     private void parseOpcode(byte data) throws ProtocolError {
+        
+    	if(mWakeLock != null) synchronized (mWakeLock) {
+    		mWakeLock.acquire();
+		}
+    	
         boolean rsv1 = (data & RSV1) == RSV1;
         boolean rsv2 = (data & RSV2) == RSV2;
         boolean rsv3 = (data & RSV3) == RSV3;

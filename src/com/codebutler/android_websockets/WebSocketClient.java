@@ -2,6 +2,7 @@ package com.codebutler.android_websockets;
 
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.PowerManager.WakeLock;
 import android.text.TextUtils;
 import android.util.Base64;
 import android.util.Log;
@@ -26,222 +27,260 @@ import java.security.NoSuchAlgorithmException;
 import java.util.List;
 
 public class WebSocketClient {
-    private static final String TAG = "WebSocketClient";
+	private static final String TAG = "WebSocketClient";
 
-    private URI                      mURI;
-    private Listener                 mListener;
-    private Socket                   mSocket;
-    private Thread                   mThread;
-    private HandlerThread            mHandlerThread;
-    private Handler                  mHandler;
-    private List<BasicNameValuePair> mExtraHeaders;
-    private HybiParser               mParser;
-    private boolean                  mConnected;
+	private URI                      mURI;
+	private Listener                 mListener;
+	private Socket                   mSocket;
+	private Thread                   mThread;
+	private HandlerThread            mHandlerThread;
+	private Handler                  mHandler;
+	private List<BasicNameValuePair> mExtraHeaders;
+	private HybiParser               mParser;
+	private boolean                  mConnected;
+	private WakeLock				 mWakeLock;
 
-    private final Object mSendLock = new Object();
+	private final Object mSendLock = new Object();
 
-    private static TrustManager[] sTrustManagers;
+	private static TrustManager[] sTrustManagers;
 
-    public static void setTrustManagers(TrustManager[] tm) {
-        sTrustManagers = tm;
-    }
+	public static void setTrustManagers(TrustManager[] tm) {
+		sTrustManagers = tm;
+	}
 
-    public WebSocketClient(URI uri, Listener listener, List<BasicNameValuePair> extraHeaders) {
-        mURI          = uri;
-        mListener     = listener;
-        mExtraHeaders = extraHeaders;
-        mConnected    = false;
-        mParser       = new HybiParser(this);
+	public WebSocketClient(URI uri, Listener listener, List<BasicNameValuePair> extraHeaders) {
+		mURI          = uri;
+		mListener     = listener;
+		mExtraHeaders = extraHeaders;
+		mConnected    = false;
+		mParser       = new HybiParser(this);
 
-        mHandlerThread = new HandlerThread("websocket-thread");
-        mHandlerThread.start();
-        mHandler = new Handler(mHandlerThread.getLooper());
-    }
+		mHandlerThread = new HandlerThread("websocket-thread");
+		mHandlerThread.start();
+		mHandler = new Handler(mHandlerThread.getLooper());
+	}
 
-    public Listener getListener() {
-        return mListener;
-    }
+	public WebSocketClient(URI uri, Listener listener, List<BasicNameValuePair> extraHeaders, WakeLock wakelock) {
+		mURI          = uri;
+		mListener     = listener;
+		mExtraHeaders = extraHeaders;
+		mConnected    = false;
+		mParser       = new HybiParser(this, wakelock);
 
-    public void connect() {
-        if (mThread != null && mThread.isAlive()) {
-            return;
-        }
+		mHandlerThread = new HandlerThread("websocket-thread");
+		mHandlerThread.start();
+		mHandler = new Handler(mHandlerThread.getLooper());
+		mWakeLock = wakelock;
+	}
 
-        mThread = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    int port = (mURI.getPort() != -1) ? mURI.getPort() : ((mURI.getScheme().equals("wss") || mURI.getScheme().equals("https")) ? 443 : 80);
+	public Listener getListener() {
+		return mListener;
+	}
 
-                    String path = TextUtils.isEmpty(mURI.getPath()) ? "/" : mURI.getPath();
-                    if (!TextUtils.isEmpty(mURI.getQuery())) {
-                        path += "?" + mURI.getQuery();
-                    }
+	public void connect() {
+		if (mThread != null && mThread.isAlive()) {
+			return;
+		}
 
-                    String originScheme = mURI.getScheme().equals("wss") ? "https" : "http";
-                    URI origin = new URI(originScheme, "//" + mURI.getHost(), null);
+		mThread = new Thread(new Runnable() {
+			@Override
+			public void run() {
+				try {
+					if(mWakeLock != null) synchronized (mWakeLock) {
+						mWakeLock.acquire();
+					}
+					int port = (mURI.getPort() != -1) ? mURI.getPort() : ((mURI.getScheme().equals("wss") || mURI.getScheme().equals("https")) ? 443 : 80);
 
-                    SocketFactory factory = (mURI.getScheme().equals("wss") || mURI.getScheme().equals("https")) ? getSSLSocketFactory() : SocketFactory.getDefault();
-                    mSocket = factory.createSocket(mURI.getHost(), port);
+					String path = TextUtils.isEmpty(mURI.getPath()) ? "/" : mURI.getPath();
+					if (!TextUtils.isEmpty(mURI.getQuery())) {
+						path += "?" + mURI.getQuery();
+					}
 
-                    PrintWriter out = new PrintWriter(mSocket.getOutputStream());
-                    out.print("GET " + path + " HTTP/1.1\r\n");
-                    out.print("Upgrade: websocket\r\n");
-                    out.print("Connection: Upgrade\r\n");
-                    out.print("Host: " + mURI.getHost() + "\r\n");
-                    out.print("Origin: " + origin.toString() + "\r\n");
-                    out.print("Sec-WebSocket-Key: " + createSecret() + "\r\n");
-                    out.print("Sec-WebSocket-Version: 13\r\n");
-                    if (mExtraHeaders != null) {
-                        for (NameValuePair pair : mExtraHeaders) {
-                            out.print(String.format("%s: %s\r\n", pair.getName(), pair.getValue()));
-                        }
-                    }
-                    out.print("\r\n");
-                    out.flush();
+					String originScheme = mURI.getScheme().equals("wss") ? "https" : "http";
+					URI origin = new URI(originScheme, "//" + mURI.getHost(), null);
 
-                    HybiParser.HappyDataInputStream stream = new HybiParser.HappyDataInputStream(mSocket.getInputStream());
+					SocketFactory factory = (mURI.getScheme().equals("wss") || mURI.getScheme().equals("https")) ? getSSLSocketFactory() : SocketFactory.getDefault();
+					mSocket = factory.createSocket(mURI.getHost(), port);
 
-                    // Read HTTP response status line.
-                    StatusLine statusLine = parseStatusLine(readLine(stream));
-                    if (statusLine == null) {
-                        throw new HttpException("Received no reply from server.");
-                    } else if (statusLine.getStatusCode() != HttpStatus.SC_SWITCHING_PROTOCOLS) {
-                        throw new HttpResponseException(statusLine.getStatusCode(), statusLine.getReasonPhrase());
-                    }
+					PrintWriter out = new PrintWriter(mSocket.getOutputStream());
+					out.print("GET " + path + " HTTP/1.1\r\n");
+					out.print("Upgrade: websocket\r\n");
+					out.print("Connection: Upgrade\r\n");
+					out.print("Host: " + mURI.getHost() + "\r\n");
+					out.print("Origin: " + origin.toString() + "\r\n");
+					out.print("Sec-WebSocket-Key: " + createSecret() + "\r\n");
+					out.print("Sec-WebSocket-Version: 13\r\n");
+					if (mExtraHeaders != null) {
+						for (NameValuePair pair : mExtraHeaders) {
+							out.print(String.format("%s: %s\r\n", pair.getName(), pair.getValue()));
+						}
+					}
+					out.print("\r\n");
+					out.flush();
 
-                    // Read HTTP response headers.
-                    String line;
-                    while (!TextUtils.isEmpty(line = readLine(stream))) {
-                        Header header = parseHeader(line);
-                        if (header.getName().equals("Sec-WebSocket-Accept")) {
-                            // FIXME: Verify the response...
-                        }
-                    }
+					HybiParser.HappyDataInputStream stream = new HybiParser.HappyDataInputStream(mSocket.getInputStream());
 
-                    mListener.onConnect();
+					// Read HTTP response status line.
+					StatusLine statusLine = parseStatusLine(readLine(stream));
+					if (statusLine == null) {
+						throw new HttpException("Received no reply from server.");
+					} else if (statusLine.getStatusCode() != HttpStatus.SC_SWITCHING_PROTOCOLS) {
+						throw new HttpResponseException(statusLine.getStatusCode(), statusLine.getReasonPhrase());
+					}
 
-                    mConnected = true;
+					// Read HTTP response headers.
+					String line;
+					while (!TextUtils.isEmpty(line = readLine(stream))) {
+						Header header = parseHeader(line);
+						if (header.getName().equals("Sec-WebSocket-Accept")) {
+							// FIXME: Verify the response...
+						}
+					}
 
-                    // Now decode websocket frames.
-                    mParser.start(stream);
+					mListener.onConnect();
 
-                } catch (EOFException ex) {
-                    Log.d(TAG, "WebSocket EOF!", ex);
-                    mListener.onDisconnect(0, "EOF");
-                    mConnected = false;
+					mConnected = true;
+					if(mWakeLock != null && mWakeLock.isHeld()) mWakeLock.release();
+					// Now decode websocket frames.
+					mParser.start(stream);
 
-                } catch (SSLException ex) {
-                    // Connection reset by peer
-                    Log.d(TAG, "Websocket SSL error!", ex);
-                    mListener.onDisconnect(0, "SSL");
-                    mConnected = false;
+				} catch (EOFException ex) {
+					Log.d(TAG, "WebSocket EOF!", ex);
+					mListener.onDisconnect(0, "EOF");
+					mConnected = false;
 
-                } catch (Exception ex) {
-                    mListener.onError(ex);
-                }
-            }
-        });
-        mThread.start();
-    }
+				} catch (SSLException ex) {
+					// Connection reset by peer
+					Log.d(TAG, "Websocket SSL error!", ex);
+					mListener.onDisconnect(0, "SSL");
+					mConnected = false;
 
-    public void disconnect() {
-        if (mSocket != null) {
-            mHandler.post(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        mSocket.close();
-                        mSocket = null;
-                        mConnected = false;
-                    } catch (IOException ex) {
-                        Log.d(TAG, "Error while disconnecting", ex);
-                        mListener.onError(ex);
-                    }
-                }
-            });
-        }
-    }
+				} catch (Exception ex) {
+					mListener.onError(ex);
+					mConnected = false;
+				} finally {
+					if(mWakeLock != null && mWakeLock.isHeld()){
+						mWakeLock.setReferenceCounted(false);
+						mWakeLock.release();
+						mWakeLock.setReferenceCounted(true);
+					}
+				}
+			}
+		});
+		mThread.start();
+	}
 
-    public void send(String data) {
-        sendFrame(mParser.frame(data));
-    }
+	public void disconnect() {
+		if (mSocket != null) {
+			mHandler.post(new Runnable() {
+				@Override
+				public void run() {
+					try {
+						mSocket.close();
+						mSocket = null;
+						mConnected = false;
+					} catch (IOException ex) {
+						Log.d(TAG, "Error while disconnecting", ex);
+						mListener.onError(ex);
+					}
+				}
+			});
+		}
+	}
 
-    public void send(byte[] data) {
-        sendFrame(mParser.frame(data));
-    }
+	public void send(String data) {
+		sendFrame(mParser.frame(data));
+	}
 
-    public boolean isConnected() {
-        return mConnected;
-    }
+	public void send(byte[] data) {
+		sendFrame(mParser.frame(data));
+	}
 
-    private StatusLine parseStatusLine(String line) {
-        if (TextUtils.isEmpty(line)) {
-            return null;
-        }
-        return BasicLineParser.parseStatusLine(line, new BasicLineParser());
-    }
+	public boolean isConnected() {
+		return mConnected;
+	}
 
-    private Header parseHeader(String line) {
-        return BasicLineParser.parseHeader(line, new BasicLineParser());
-    }
+	private StatusLine parseStatusLine(String line) {
+		if (TextUtils.isEmpty(line)) {
+			return null;
+		}
+		return BasicLineParser.parseStatusLine(line, new BasicLineParser());
+	}
 
-    // Can't use BufferedReader because it buffers past the HTTP data.
-    private String readLine(HybiParser.HappyDataInputStream reader) throws IOException {
-        int readChar = reader.read();
-        if (readChar == -1) {
-            return null;
-        }
-        StringBuilder string = new StringBuilder("");
-        while (readChar != '\n') {
-            if (readChar != '\r') {
-                string.append((char) readChar);
-            }
+	private Header parseHeader(String line) {
+		return BasicLineParser.parseHeader(line, new BasicLineParser());
+	}
 
-            readChar = reader.read();
-            if (readChar == -1) {
-                return null;
-            }
-        }
-        return string.toString();
-    }
+	// Can't use BufferedReader because it buffers past the HTTP data.
+	private String readLine(HybiParser.HappyDataInputStream reader) throws IOException {
+		int readChar = reader.read();
+		if (readChar == -1) {
+			return null;
+		}
+		StringBuilder string = new StringBuilder("");
+		while (readChar != '\n') {
+			if (readChar != '\r') {
+				string.append((char) readChar);
+			}
 
-    private String createSecret() {
-        byte[] nonce = new byte[16];
-        for (int i = 0; i < 16; i++) {
-            nonce[i] = (byte) (Math.random() * 256);
-        }
-        return Base64.encodeToString(nonce, Base64.DEFAULT).trim();
-    }
+			readChar = reader.read();
+			if (readChar == -1) {
+				return null;
+			}
+		}
+		return string.toString();
+	}
 
-    void sendFrame(final byte[] frame) {
-        mHandler.post(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    synchronized (mSendLock) {
-                        OutputStream outputStream = mSocket.getOutputStream();
-                        outputStream.write(frame);
-                        outputStream.flush();
-                    }
-                } catch (IOException e) {
-                    mListener.onError(e);
-                }
-            }
-        });
-    }
+	private String createSecret() {
+		byte[] nonce = new byte[16];
+		for (int i = 0; i < 16; i++) {
+			nonce[i] = (byte) (Math.random() * 256);
+		}
+		return Base64.encodeToString(nonce, Base64.DEFAULT).trim();
+	}
 
-    public interface Listener {
-        public void onConnect();
-        public void onMessage(String message);
-        public void onMessage(byte[] data);
-        public void onDisconnect(int code, String reason);
-        public void onError(Exception error);
-    }
+	void sendFrame(final byte[] frame) {
+		mHandler.post(new Runnable() {
+			@Override
+			public void run() {
+				try {
+					synchronized (mSendLock) {
+						if(mWakeLock != null) synchronized (mWakeLock) {
+							mWakeLock.acquire();
+						}
+						OutputStream outputStream = mSocket.getOutputStream();
+						outputStream.write(frame);
+						outputStream.flush();
+					}
+				} catch (IOException e) {
+					mListener.onError(e);
+					mConnected = false;
+					if(mWakeLock != null) synchronized (mWakeLock) {
+						mWakeLock.setReferenceCounted(false);
+					}
+				} finally {
+					if(mWakeLock != null) synchronized (mWakeLock) {
+						if(mWakeLock.isHeld()) {
+							mWakeLock.release();
+							mWakeLock.setReferenceCounted(true);
+						}
+					}
+				}
+			}
+		});
+	}
 
-    private SSLSocketFactory getSSLSocketFactory() throws NoSuchAlgorithmException, KeyManagementException {
-        SSLContext context = SSLContext.getInstance("TLS");
-        context.init(null, sTrustManagers, null);
-        return context.getSocketFactory();
-    }
+	public interface Listener {
+		public void onConnect();
+		public void onMessage(String message);
+		public void onMessage(byte[] data);
+		public void onDisconnect(int code, String reason);
+		public void onError(Exception error);
+	}
+
+	private SSLSocketFactory getSSLSocketFactory() throws NoSuchAlgorithmException, KeyManagementException {
+		SSLContext context = SSLContext.getInstance("TLS");
+		context.init(null, sTrustManagers, null);
+		return context.getSocketFactory();
+	}
 }
