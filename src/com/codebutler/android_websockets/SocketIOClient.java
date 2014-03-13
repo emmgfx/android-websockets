@@ -253,7 +253,7 @@ public class SocketIOClient {
         mClient.disconnect();
         mClient = null;
        
-        mSendLooper.quit();
+//      mSendLooper.quit();
         mSendLooper = null;
         mSendHandler = null;
     }
